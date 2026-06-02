@@ -1,0 +1,70 @@
+name: Build (iOS 3 / armv6)
+
+on:
+  push:
+    branches: [ iOS3 ]
+  pull_request:
+    branches: [ iOS3 ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps (clang, odcctools, ldid)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential fakeroot rsync curl perl zip git \
+            libxml2 libtinfo5 clang lld llvm dpkg-dev xz-utils
+          # ldid + odcctools (Mach-O linker) from Theos' APT repo
+          echo "deb [trusted=yes] https://repo.theos.dev/ ./" | \
+            sudo tee /etc/apt/sources.list.d/theos.list
+          sudo apt-get update || true
+          sudo apt-get install -y ldid odcctools || \
+            (curl -fsSL https://github.com/sbingner/ldid/releases/latest/download/ldid_linux_x86_64 \
+               -o /usr/local/bin/ldid && sudo chmod +x /usr/local/bin/ldid)
+
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+
+      - name: Fetch iPhoneOS 5.1 SDK (last armv6 SDK)
+        run: |
+          tmp="$(mktemp -d)"
+          git -C "$tmp" init -q
+          git -C "$tmp" remote add origin https://github.com/HDevices/Theos-legacy-iOS5.git
+          git -C "$tmp" config core.sparseCheckout true
+          echo "sdks/iPhoneOS5.1.sdk/*" > "$tmp/.git/info/sparse-checkout"
+          git -C "$tmp" pull --depth 1 origin master
+          mkdir -p "$THEOS/sdks"
+          mv "$tmp/sdks/iPhoneOS5.1.sdk" "$THEOS/sdks/"
+
+      - name: Build mbedTLS (armv6 / iOS 5.1)
+        run: |
+          chmod +x deps/build-mbedtls-ios.sh
+          ARCH=armv6 MIN_IOS=3.1 SDK="$THEOS/sdks/iPhoneOS5.1.sdk" \
+            ./deps/build-mbedtls-ios.sh
+
+      - name: Build IPAInstaller (.deb)
+        run: |
+          cd IPAInstaller
+          make clean
+          make package FINALPACKAGE=1 \
+            THEOS_DEVICE_SIMULATOR=0 \
+            ARCHS=armv6 \
+            TARGET=iphone:clang:5.1:3.1
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppDrop-iOS3-armv6
+          path: |
+            IPAInstaller/packages/*.deb
+            IPAInstaller/.theos/obj/**/*.dylib
+          if-no-files-found: warn
